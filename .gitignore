@@ -1,0 +1,21 @@
+# Maven
+target/
+dependency-reduced-pom.xml
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+out/
+
+# ОС
+.DS_Store
+Thumbs.db
+
+# Артефакты эмулятора
+*.img
+*.log
+logs/
