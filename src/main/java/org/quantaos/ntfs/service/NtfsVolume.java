@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.io.RandomAccessFile;
 import java.util.*;
 
 /**
@@ -80,7 +81,7 @@ public final class NtfsVolume {
         state.getGroups().put("users", new Group("users", 1, 0));
         state.getUsers().put(adminLogin,
                 new User(adminLogin, PasswordHasher.sha256(password),
-                        0, 0, Role.ADMIN));
+                        0, 0, Role.ADMIN, false));
         save();
     }
     /**
@@ -117,6 +118,8 @@ public final class NtfsVolume {
         User u = state.getUsers().get(login);
         if (u == null || !u.passwordHash().equals(PasswordHasher.sha256(password)))
             throw new SecurityException("Неверный логин или пароль");
+        if (u.blocked())
+            throw new SecurityException("Пользователь заблокирован администратором");
         session = u;
         currentDirectory = ROOT_RECORD;
     }
@@ -167,7 +170,25 @@ public final class NtfsVolume {
                         -1) +
                         1;
         state.getUsers().put(login, new User(login, PasswordHasher.sha256(password),
-                uid, g.gid(), Role.USER));
+                uid, g.gid(), Role.USER, false));
+        changed();
+    }
+    /**
+     * USER_DELETE учебной модели: не стирает владельца файлов, а блокирует его.
+     * Благодаря этому MFT-записи и права на уже созданные файлы не становятся
+     * «ничьими», но новый вход пользователя невозможен.
+     *
+     * @param login логин блокируемого пользователя
+     */
+    public void blockUser(String login) {
+        admin();
+        if (session.login().equals(login))
+            throw new IllegalArgumentException("Нельзя заблокировать текущий сеанс");
+        User user = Optional.ofNullable(state.getUsers().get(login)).orElseThrow(
+                () -> new IllegalArgumentException("Нет пользователя: " + login));
+        if (user.blocked())
+            throw new IllegalArgumentException("Пользователь уже заблокирован");
+        state.getUsers().put(login, user.withBlocked(true));
         changed();
     }
     /**
@@ -446,6 +467,37 @@ public final class NtfsVolume {
                 ", MFT=" + s.mftRecordCount() +
                 ", dataStart=" + s.dataStartCluster() +
                 ", B-tree t=" + s.bTreeDegree();
+    }
+    /**
+     * Показывает диапазон байтов физического образа в шестнадцатеричном виде.
+     * Команда нужна для демонстрации: те же байты можно открыть внешним
+     * hex-редактором. Смещение 0 содержит суперблок.
+     *
+     * @param offset смещение от начала образа
+     * @param count число выводимых байтов (1..4096)
+     * @return строки дампа по 16 байт
+     */
+    public String hexDump(long offset, int count) {
+        ensureMounted();
+        if (offset < 0 || count < 1 || count > 4096)
+            throw new IllegalArgumentException("Допустимо 1..4096 байт и неотрицательное смещение");
+        if (offset + count > state.getSuperblock().diskSize())
+            throw new IllegalArgumentException("Диапазон выходит за границы образа");
+        StringBuilder out = new StringBuilder();
+        try (RandomAccessFile image = new RandomAccessFile(imagePath.toFile(), "r")) {
+            image.seek(offset);
+            for (int i = 0; i < count; i++) {
+                if (i % 16 == 0) {
+                    if (i > 0)
+                        out.append(System.lineSeparator());
+                    out.append(String.format("%08X: ", offset + i));
+                }
+                out.append(String.format("%02X ", image.readUnsignedByte()));
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("Не удалось прочитать образ", e);
+        }
+        return out.toString();
     }
     /** @return {@code true}, если образ смонтирован. */
     public boolean isMounted() { return state != null; }

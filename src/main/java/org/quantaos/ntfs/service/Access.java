@@ -6,40 +6,44 @@ import org.quantaos.ntfs.model.User;
 
 /**
  * Пункт 1.1.7: проверка девяти битов rwx для владельца, группы и остальных.
- * Администратор проходит проверку без ограничений
+ * Администратор проходит проверку без ограничений.
  */
 public final class Access {
-    /** Биты чтения, записи и выполнения внутри одной октальной тройки прав */
+    /** Биты чтения, записи и выполнения внутри одной октальной тройки прав. */
     public static final int READ = 4, WRITE = 2, EXECUTE = 1;
 
     /** Запрещает создание объекта утилитного класса. */
+    private Access() {}
 
     /**
-     * Выбирает права владельца, группы или остальных и проверяет запршенные биты.
+     * Выбирает права владельца, группы или остальных и проверяет запрошенные
+     * биты.
      *
      * @param user пользователь текущего сеанса
      * @param entry объект, к которому запрашивается доступ
      * @param requested комбинация {@link #READ}, {@link #WRITE}, {@link #EXECUTE}
      * @return {@code true}, если операция разрешена
      */
-    public static boolean allows(User user, MftEntry entry, int requested){
-        if(user.role() == Role.ADMIN){
+    public static boolean allows(User user, MftEntry entry, int requested) {
+        // Заблокированный пользователь не может получить доступ даже при наличии
+        // старого объекта сеанса: это вторая линия защиты после проверки login.
+        if (user.blocked())
+            return false;
+        if (user.role() == Role.ADMIN)
             return true;
-        }
-        int bits = user.uid() == entry.getOwnerUid() ? entry.getPermissions() >> 6
+        int bits = user.uid() == entry.getOwnerUid()   ? entry.getPermissions() >> 6
                 : user.gid() == entry.getGroupGid() ? entry.getPermissions() >> 3
-                                                    : entry.getPermissions();
+                : entry.getPermissions();
         return (bits & requested) == requested;
     }
-
     /**
      * Проверяет доступ и выбрасывает понятную ошибку, если он запрещён.
      *
-     * @throws SecurityException если пользователь не обладает запрошенными правами.
+     * @throws SecurityException если пользователь не обладает запрошенными
+     *     правами
      */
-    public static void require(User user, MftEntry entry, int requested){
-        if (!allows(user, entry, requested)){
+    public static void require(User user, MftEntry entry, int requested) {
+        if (!allows(user, entry, requested))
             throw new SecurityException("Доступ запрещён: " + entry.getName());
-        }
     }
 }
