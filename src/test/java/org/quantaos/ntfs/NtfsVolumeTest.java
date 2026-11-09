@@ -71,5 +71,21 @@ class NtfsVolumeTest {
         assertEquals(40, fs.list("/").size());
         assertEquals("", fs.read("f39"));
     }
+    /**
+     * Проверяет, что первый сектор действительно читается как бинарный
+     * суперблок, а блокировка пользователя сохраняется после размонтирования.
+     */
+    @Test
+    void storesBinarySuperblockAndBlocksInsteadOfDeletingUser() throws Exception {
+        Path image = dir.resolve("raw.ntfs");
+        NtfsVolume fs = new NtfsVolume();
+        fs.format(image, 64L * 1024 * 1024, "admin", "secret");
+        assertTrue(fs.hexDump(0, 8).contains("44 4F 4E 4E 54 46 53"));
+        fs.login("admin", "secret");
+        fs.addUser("alice", "pw", "users");
+        fs.blockUser("alice");
+        fs.unmount();
+        fs.mount(image);
+        assertThrows(SecurityException.class, () -> fs.login("alice", "pw"));
+    }
 }
-
