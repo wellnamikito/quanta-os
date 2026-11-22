@@ -6,9 +6,15 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Scanner;
+import org.quantaos.process.MultilevelFeedbackScheduler;
+import org.quantaos.process.ProcessSnapshot;
 
 /**
- * Командный интерпретатор учебной NTFS-подобной файловой системы.
+ * Командный интерпретатор учебной операционной системы QuantaOS.
+ *
+ * <p>Оболочка принимает команды пользователя, передаёт операции файловой
+ * системы объекту {@link NtfsVolume} и управляет учебным планировщиком
+ * процессов.</p>
  */
 public final class CommandShell {
     private final Scanner input;
@@ -16,7 +22,14 @@ public final class CommandShell {
     private final NtfsVolume volume = new NtfsVolume();
 
     /**
-     * Создаёт оболочку с заданными потоками.
+     * Планировщик процессов MLFQ. Он существует независимо от состояния
+     * смонтированного образа файловой системы.
+     */
+    private final MultilevelFeedbackScheduler scheduler =
+            new MultilevelFeedbackScheduler();
+
+    /**
+     * Создаёт оболочку с заданными потоками ввода и вывода.
      *
      * @param input источник строк команд
      * @param output поток сообщений пользователю
@@ -30,12 +43,12 @@ public final class CommandShell {
      * Запускает цикл чтения команд до exit, quit или конца входного потока.
      */
     public void run() {
-        output.println("DONNTU NTFS emulator. Введите help для справки.");
+        output.println("QuantaOS emulator. Введите help для справки.");
 
         while (true) {
             output.print(volume.isMounted()
-                    ? (volume.isLoggedIn() ? "ntfs$ " : "ntfs(login)$ ")
-                    : "ntfs(unmounted)$ ");
+                    ? (volume.isLoggedIn() ? "quanta$ " : "quanta(login)$ ")
+                    : "quanta(unmounted)$ ");
 
             if (!input.hasNextLine())
                 return;
@@ -57,41 +70,34 @@ public final class CommandShell {
     /**
      * Разбирает одну введённую строку и вызывает соответствующую операцию.
      *
-     * @param line введённая строка
-     * @return true, если оболочку нужно завершить
+     * @param line введённая пользователем команда
+     * @return true, если оболочку необходимо завершить
+     * @throws Exception при ошибке файловой системы или ввода-вывода
      */
     boolean execute(String line) throws Exception {
-        List<String> a = words(line);
-        String cmd = a.getFirst().toLowerCase();
+        List<String> args = words(line);
+        String command = args.getFirst().toLowerCase();
 
-        switch (cmd) {
-            case "help" ->
-                    output.println(
-                            "format <file> <bytes> <admin> <password>; "
-                                    + "mount <file>; unmount; login/logout; "
-                                    + "useradd <login> <password> <group>; "
-                                    + "userdel <login>; groupadd <name>; "
-                                    + "mkfile/mkdir <path>; append <path> <text>; "
-                                    + "cat <path>; copy <path> <dir>; "
-                                    + "move <path> <dir>; rename <path> <name>; "
-                                    + "delete <path>; chmod <path> <xyz>; "
-                                    + "ls [path]; cd <path>; pwd; info; "
-                                    + "hexdump <offset> <bytes>; exit");
+        switch (command) {
+            case "help" -> output.println(helpText());
 
             case "format" -> {
-                need(a, 5);
+                need(args, 5);
+
                 volume.format(
-                        Path.of(a.get(1)),
-                        Long.parseLong(a.get(2)),
-                        a.get(3),
-                        a.get(4)
+                        Path.of(args.get(1)),
+                        Long.parseLong(args.get(2)),
+                        args.get(3),
+                        args.get(4)
                 );
+
                 output.println("Образ отформатирован");
             }
 
             case "mount" -> {
-                need(a, 2);
-                volume.mount(Path.of(a.get(1)));
+                need(args, 2);
+
+                volume.mount(Path.of(args.get(1)));
                 output.println("Образ смонтирован");
             }
 
@@ -101,8 +107,9 @@ public final class CommandShell {
             }
 
             case "login" -> {
-                need(a, 3);
-                volume.login(a.get(1), a.get(2));
+                need(args, 3);
+
+                volume.login(args.get(1), args.get(2));
                 output.println("Вход выполнен");
             }
 
@@ -112,75 +119,101 @@ public final class CommandShell {
             }
 
             case "groupadd" -> {
-                need(a, 2);
-                volume.addGroup(a.get(1));
+                need(args, 2);
+
+                volume.addGroup(args.get(1));
                 output.println("Группа создана");
             }
 
             case "useradd" -> {
-                need(a, 4);
-                volume.addUser(a.get(1), a.get(2), a.get(3));
+                need(args, 4);
+
+                volume.addUser(
+                        args.get(1),
+                        args.get(2),
+                        args.get(3)
+                );
+
                 output.println("Пользователь создан");
             }
 
             case "userdel" -> {
-                need(a, 2);
-                volume.blockUser(a.get(1));
+                need(args, 2);
+
+                volume.blockUser(args.get(1));
                 output.println("Пользователь заблокирован; его файлы сохранены");
             }
 
             case "mkfile" -> {
-                need(a, 2);
-                volume.create(a.get(1), false);
+                need(args, 2);
+
+                volume.create(args.get(1), false);
+                output.println("Файл создан");
             }
 
             case "mkdir" -> {
-                need(a, 2);
-                volume.create(a.get(1), true);
+                need(args, 2);
+
+                volume.create(args.get(1), true);
+                output.println("Каталог создан");
             }
 
             case "append" -> {
-                need(a, 3);
-                volume.append(a.get(1), a.get(2));
+                need(args, 3);
+
+                volume.append(args.get(1), args.get(2));
+                output.println("Данные добавлены");
             }
 
             case "cat" -> {
-                need(a, 2);
-                output.println(volume.read(a.get(1)));
+                need(args, 2);
+
+                output.println(volume.read(args.get(1)));
             }
 
             case "copy" -> {
-                need(a, 3);
-                volume.copy(a.get(1), a.get(2));
+                need(args, 3);
+
+                volume.copy(args.get(1), args.get(2));
+                output.println("Копирование выполнено");
             }
 
             case "move" -> {
-                need(a, 3);
-                volume.move(a.get(1), a.get(2));
+                need(args, 3);
+
+                volume.move(args.get(1), args.get(2));
+                output.println("Перемещение выполнено");
             }
 
             case "rename" -> {
-                need(a, 3);
-                volume.rename(a.get(1), a.get(2));
+                need(args, 3);
+
+                volume.rename(args.get(1), args.get(2));
+                output.println("Переименование выполнено");
             }
 
             case "delete" -> {
-                need(a, 2);
-                volume.delete(a.get(1));
+                need(args, 2);
+
+                volume.delete(args.get(1));
+                output.println("Объект удалён");
             }
 
             case "chmod" -> {
-                need(a, 3);
-                volume.chmod(a.get(1), a.get(2));
+                need(args, 3);
+
+                volume.chmod(args.get(1), args.get(2));
+                output.println("Права доступа изменены");
             }
 
-            case "ls" ->
-                    volume.list(a.size() == 1 ? "." : a.get(1))
-                            .forEach(output::println);
+            case "ls" -> volume.list(
+                    args.size() == 1 ? "." : args.get(1)
+            ).forEach(output::println);
 
             case "cd" -> {
-                need(a, 2);
-                volume.cd(a.get(1));
+                need(args, 2);
+
+                volume.cd(args.get(1));
             }
 
             case "pwd" -> output.println(volume.pwd());
@@ -188,14 +221,93 @@ public final class CommandShell {
             case "info" -> output.println(volume.info());
 
             case "hexdump" -> {
-                need(a, 3);
+                need(args, 3);
+
                 output.println(
                         volume.hexDump(
-                                Long.parseLong(a.get(1)),
-                                Integer.parseInt(a.get(2))
+                                Long.parseLong(args.get(1)),
+                                Integer.parseInt(args.get(2))
                         )
                 );
             }
+
+            case "procadd" -> {
+                need(args, 3);
+
+                int relativePriority = args.size() >= 4
+                        ? Integer.parseInt(args.get(3))
+                        : 0;
+
+                int pid = scheduler.create(
+                        args.get(1),
+                        Integer.parseInt(args.get(2)),
+                        relativePriority
+                );
+
+                output.println("Процесс создан: PID=" + pid);
+            }
+
+            case "tick" -> {
+                int count = args.size() >= 2
+                        ? Integer.parseInt(args.get(1))
+                        : 1;
+
+                scheduler.tick(count).forEach(output::println);
+            }
+
+            case "ps" -> {
+                output.println("PID NAME STATE ABS REL DYN CPU WAIT");
+
+                for (ProcessSnapshot process : scheduler.snapshot()) {
+                    output.printf(
+                            "%d %s %s %d %d %d %d %d%n",
+                            process.pid(),
+                            process.name(),
+                            process.state(),
+                            process.absolutePriority(),
+                            process.relativePriority(),
+                            process.dynamicPriority(),
+                            process.executedTicks(),
+                            process.waitedTicks()
+                    );
+                }
+            }
+
+            case "block" -> {
+                need(args, 2);
+
+                scheduler.block(Integer.parseInt(args.get(1)));
+                output.println("Процесс заблокирован");
+            }
+
+            case "wake" -> {
+                need(args, 2);
+
+                scheduler.wake(Integer.parseInt(args.get(1)));
+                output.println("Процесс разблокирован");
+            }
+
+            case "kill" -> {
+                need(args, 2);
+
+                scheduler.terminate(Integer.parseInt(args.get(1)));
+                output.println("Процесс завершён");
+            }
+
+            case "renice" -> {
+                need(args, 3);
+
+                scheduler.setRelativePriority(
+                        Integer.parseInt(args.get(1)),
+                        Integer.parseInt(args.get(2))
+                );
+
+                output.println("Относительный приоритет изменён");
+            }
+
+            case "scheduler" -> output.println(
+                    scheduler.currentProcess()
+            );
 
             case "exit", "quit" -> {
                 if (volume.isMounted())
@@ -204,59 +316,186 @@ public final class CommandShell {
                 return true;
             }
 
-            default -> output.println("Неизвестная команда: " + cmd);
+            default -> output.println(
+                    "Неизвестная команда: " + command
+            );
         }
 
         return false;
     }
 
     /**
-     * Проверяет минимальное число аргументов команды.
+     * Формирует многострочную справку по всем командам эмулятора.
      *
-     * @param a список аргументов
-     * @param n минимальное требуемое число аргументов
+     * @return текст справки для команды help
      */
-    private static void need(List<String> a, int n) {
-        if (a.size() < n)
-            throw new IllegalArgumentException("Недостаточно параметров");
+    private static String helpText() {
+        return """
+                
+                ===== QuantaOS: справка =====
+                
+                ОБРАЗ ФАЙЛОВОЙ СИСТЕМЫ
+                  format <file> <bytes> <admin> <password>
+                      Создать и отформатировать образ.
+                  
+                  mount <file>
+                      Смонтировать существующий образ.
+                  
+                  unmount
+                      Сохранить изменения и размонтировать образ.
+                  
+                  info
+                      Показать параметры суперблока.
+                  
+                  hexdump <offset> <bytes>
+                      Показать байты образа в шестнадцатеричном виде.
+                
+                
+                ПОЛЬЗОВАТЕЛИ И ГРУППЫ
+                  login <login> <password>
+                      Войти в систему.
+                  
+                  logout
+                      Завершить текущий сеанс.
+                  
+                  groupadd <name>
+                      Создать группу. Доступно администратору.
+                  
+                  useradd <login> <password> <group>
+                      Создать пользователя и назначить ему одну группу.
+                  
+                  userdel <login>
+                      Заблокировать пользователя, сохранив его файлы.
+                
+                
+                ФАЙЛЫ И КАТАЛОГИ
+                  mkfile <path>
+                      Создать пустой файл.
+                  
+                  mkdir <path>
+                      Создать каталог.
+                  
+                  append <path> <text>
+                      Добавить текст в конец файла.
+                  
+                  cat <path>
+                      Прочитать содержимое файла.
+                  
+                  ls [path]
+                      Показать содержимое текущего или указанного каталога.
+                  
+                  cd <path>
+                      Перейти в каталог.
+                  
+                  pwd
+                      Показать текущий путь.
+                  
+                  copy <path> <directory>
+                      Скопировать файл или каталог.
+                  
+                  move <path> <directory>
+                      Переместить файл или каталог.
+                  
+                  rename <path> <new-name>
+                      Переименовать файл или каталог.
+                  
+                  delete <path>
+                      Удалить файл или каталог рекурсивно.
+                  
+                  chmod <path> <xyz>
+                      Изменить права доступа, например: chmod file.txt 640.
+                
+                
+                ПРОЦЕССЫ И ПЛАНИРОВЩИК MLFQ
+                  procadd <name> <absolute 0..2> [relative -2..2]
+                      Создать процесс.
+                      0 — высокий, 1 — обычный, 2 — низкий приоритет.
+                  
+                  tick [count]
+                      Выполнить один или несколько тактов планировщика.
+                  
+                  ps
+                      Показать таблицу процессов и их приоритеты.
+                  
+                  block <pid>
+                      Заблокировать процесс, например при ожидании ввода-вывода.
+                  
+                  wake <pid>
+                      Разблокировать процесс и вернуть его в очередь готовых.
+                  
+                  kill <pid>
+                      Завершить процесс.
+                  
+                  renice <pid> <relative>
+                      Изменить относительный приоритет процесса.
+                  
+                  scheduler
+                      Показать текущий процесс, очередь и остаток кванта.
+                
+                
+                ПРОЧЕЕ
+                  help
+                      Показать эту справку.
+                  
+                  exit
+                      Сохранить образ и завершить программу.
+                """;
     }
 
     /**
-     * Разделяет строку на аргументы, сохраняя текст в двойных кавычках
+     * Проверяет минимальное число аргументов команды.
+     *
+     * @param args список аргументов команды
+     * @param required минимальное требуемое число аргументов
+     */
+    private static void need(List<String> args, int required) {
+        if (args.size() < required) {
+            throw new IllegalArgumentException(
+                    "Недостаточно параметров"
+            );
+        }
+    }
+
+    /**
+     * Делит строку на аргументы, сохраняя текст в двойных кавычках
      * единым аргументом.
      *
      * @param line строка команды
      * @return список аргументов
      */
     private static List<String> words(String line) {
-        List<String> out = new ArrayList<>();
-        StringBuilder s = new StringBuilder();
+        List<String> result = new ArrayList<>();
+        StringBuilder currentWord = new StringBuilder();
         boolean quoted = false;
 
         for (int i = 0; i < line.length(); i++) {
-            char c = line.charAt(i);
+            char symbol = line.charAt(i);
 
-            if (c == '"') {
+            if (symbol == '"') {
                 quoted = !quoted;
                 continue;
             }
 
-            if (Character.isWhitespace(c) && !quoted) {
-                if (!s.isEmpty()) {
-                    out.add(s.toString());
-                    s.setLength(0);
+            if (Character.isWhitespace(symbol) && !quoted) {
+                if (!currentWord.isEmpty()) {
+                    result.add(currentWord.toString());
+                    currentWord.setLength(0);
                 }
             } else {
-                s.append(c);
+                currentWord.append(symbol);
             }
         }
 
-        if (quoted)
-            throw new IllegalArgumentException("Незакрытая кавычка");
+        if (quoted) {
+            throw new IllegalArgumentException(
+                    "Незакрытая кавычка"
+            );
+        }
 
-        if (!s.isEmpty())
-            out.add(s.toString());
+        if (!currentWord.isEmpty()) {
+            result.add(currentWord.toString());
+        }
 
-        return out;
+        return result;
     }
 }
