@@ -17,8 +17,10 @@ Thumbs.db
 
 # Артефакты эмулятора
 *.img
+*.ntfs
 *.log
 logs/*.ntfs
+*ntfs.lock
 /target/
 /.idea/
 *.iml
