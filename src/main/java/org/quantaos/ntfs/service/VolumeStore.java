@@ -1,19 +1,25 @@
 package org.quantaos.ntfs.service;
 
-import org.quantaos.ntfs.model.FileSystemState;
-import org.quantaos.ntfs.model.Superblock;
-
-import java.io.*;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.nio.file.StandardCopyOption;
-import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
-import java.util.Map;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.util.Arrays;
+import java.util.Map;
+import org.quantaos.ntfs.model.FileSystemState;
+import org.quantaos.ntfs.model.Superblock;
 
 /**
  * Записывает учебный образ файловой системы как обычный бинарный файл.
@@ -29,6 +35,82 @@ public final class VolumeStore {
     private static final byte[] STATE_MAGIC = "QNTSTAT1".getBytes(StandardCharsets.US_ASCII);
     /** Размер первого сектора, который содержит суперблок. */
     private static final int SUPERBLOCK_BYTES = 512;
+
+    /*
+     * Блокируется не сам образ, а соседний файл .ntfs.lock. Образ при каждом
+     * сохранении атомарно заменяется временным файлом, поэтому блокировка самого
+     * образа пропала бы вместе со старым файлом после Files.move(...).
+     */
+    private FileChannel lockChannel;
+    private FileLock imageLock;
+    private Path lockedImage;
+
+    /**
+     * Не даёт двум экземплярам эмулятора одновременно монтировать один образ.
+     * Нулевой файл .lock можно оставлять на диске: важен не его размер, а
+     * удерживаемая операционной системой блокировка.
+     *
+     * @param image абсолютный путь к образу
+     * @throws IOException если образ уже занят другим экземпляром
+     */
+    public void acquireExclusiveLock(Path image) throws IOException {
+        Path target = image.toAbsolutePath().normalize();
+        if (imageLock != null && imageLock.isValid()) {
+            throw new IllegalStateException("Этот экземпляр уже держит образ: "
+                    + lockedImage);
+        }
+
+        Path lockPath = target.resolveSibling(target.getFileName() + ".lock");
+        FileChannel channel = FileChannel.open(lockPath,
+                StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+        try {
+            FileLock lock;
+            try {
+                lock = channel.tryLock();
+            } catch (OverlappingFileLockException e) {
+                throw new IOException("Образ уже открыт другим экземпляром эмулятора", e);
+            }
+            if (lock == null) {
+                throw new IOException("Образ уже открыт другим экземпляром эмулятора");
+            }
+            lockChannel = channel;
+            imageLock = lock;
+            lockedImage = target;
+        } catch (IOException | RuntimeException e) {
+            channel.close();
+            throw e;
+        }
+    }
+
+    /** Освобождает блокировку образа после его сохранения и размонтирования. */
+    public void releaseExclusiveLock() throws IOException {
+        IOException failure = null;
+        try {
+            if (imageLock != null && imageLock.isValid()) {
+                imageLock.release();
+            }
+        } catch (IOException e) {
+            failure = e;
+        }
+        try {
+            if (lockChannel != null) {
+                lockChannel.close();
+            }
+        } catch (IOException e) {
+            if (failure == null) {
+                failure = e;
+            } else {
+                failure.addSuppressed(e);
+            }
+        } finally {
+            imageLock = null;
+            lockChannel = null;
+            lockedImage = null;
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
 
     /**
      * Сохраняет полный образ во временный файл и атомарно заменяет старый.
