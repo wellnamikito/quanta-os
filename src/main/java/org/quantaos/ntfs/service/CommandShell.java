@@ -30,6 +30,15 @@ public final class CommandShell {
     public CommandShell(InputStream input, PrintStream output) {
         this.input = new Scanner(input);
         this.output = output;
+
+        /*
+         * Как и в настоящей ОС, планировщик не начинает работу с пустой таблицей:
+         * PID 1 — системный init, PID 2 — интерактивная оболочка. Файловые
+         * команды выполняются синхронно внутри shell, а долгие учебные задачи
+         * пользователь создаёт явной командой run.
+         */
+        scheduler.create("init", 0, 0);
+        scheduler.create("quanta-shell", 1, 0);
     }
     /**
      * Запускает цикл чтения команд до {@code exit}, {@code quit} или конца
@@ -73,9 +82,10 @@ public final class CommandShell {
                                     + "<login>; groupadd <name>; mkfile|touch <path>; mkdir <path>; append <path> <text>; cat <path>; "
                                     + "copy|cp <source> <destination>; move|mv <source> <destination>; rename <path> <name>; "
                                     + "delete|rm <path>; chmod <path> <xyz>; chown <user> <path>; chgrp <group> <path>; ls [-l] [path]; cd <path>; pwd; id [user]; "
-                                    + "info; hexdump <offset> <bytes>; procadd <name> <absolute 0..2> "
-                                    + "[relative -2..2]; tick [count]; ps; block/wake/kill <pid>; "
-                                    + "renice <pid> <relative>; scheduler; exit");
+                                    + "info; hexdump <offset> <bytes>; run|procadd <name> <absolute 0..2> "
+                                    + "[relative -2..2]; nice <relative -2..2> <name> <absolute 0..2>; "
+                                    + "tick [count]; ps; block|sleep/wake/kill <pid>; "
+                                    + "renice <relative -2..2> <pid>; scheduler; exit");
             case "format" -> {
                 need(a, 5);
                 volume.format(Path.of(a.get(1)), Long.parseLong(a.get(2)), a.get(3),
@@ -184,11 +194,17 @@ public final class CommandShell {
                 need(a, 3);
                 output.println(volume.hexDump(Long.parseLong(a.get(1)), Integer.parseInt(a.get(2))));
             }
-            case "procadd" -> {
+            case "procadd", "run" -> {
                 need(a, 3);
                 int relative = a.size() >= 4 ? Integer.parseInt(a.get(3)) : 0;
                 int pid = scheduler.create(a.get(1), Integer.parseInt(a.get(2)), relative);
                 output.println("Процесс создан: PID=" + pid);
+            }
+            case "nice" -> {
+                need(a, 4);
+                int pid = scheduler.create(a.get(2), Integer.parseInt(a.get(3)),
+                        Integer.parseInt(a.get(1)));
+                output.println("Процесс создан с nice=" + a.get(1) + ": PID=" + pid);
             }
             case "tick" -> {
                 int count = a.size() >= 2 ? Integer.parseInt(a.get(1)) : 1;
@@ -201,7 +217,7 @@ public final class CommandShell {
                             p.state(), p.absolutePriority(), p.relativePriority(),
                             p.dynamicPriority(), p.executedTicks(), p.waitedTicks());
             }
-            case "block" -> {
+            case "block", "sleep" -> {
                 need(a, 2);
                 scheduler.block(Integer.parseInt(a.get(1)));
             }
@@ -215,8 +231,9 @@ public final class CommandShell {
             }
             case "renice" -> {
                 need(a, 3);
-                scheduler.setRelativePriority(Integer.parseInt(a.get(1)),
-                        Integer.parseInt(a.get(2)));
+                // Linux-подобный порядок: renice <relative> <pid>.
+                scheduler.setRelativePriority(Integer.parseInt(a.get(2)),
+                        Integer.parseInt(a.get(1)));
             }
             case "scheduler" -> output.println(scheduler.currentProcess());
             case "exit", "quit" -> {

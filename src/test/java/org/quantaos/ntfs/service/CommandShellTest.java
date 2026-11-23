@@ -1,6 +1,5 @@
 package org.quantaos.ntfs.service;
 
-
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -39,5 +38,31 @@ class CommandShellTest {
         assertTrue(output.contains("moved.txt"));
         assertFalse(output.contains("Неизвестная команда"));
     }
-}
 
+    /**
+     * Таблица процессов не пуста при запуске: PID 1 моделирует init, а PID 2 —
+     * интерактивную оболочку. Команда run создаёт пользовательскую задачу.
+     */
+    @Test
+    void showsSystemProcessesAndSupportsLinuxStyleRunAndNiceCommands()
+            throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        CommandShell shell = new CommandShell(new ByteArrayInputStream(new byte[0]),
+                new PrintStream(bytes, true, StandardCharsets.UTF_8));
+
+        shell.execute("ps");
+        shell.execute("run compiler 1");
+        shell.execute("nice -1 editor 1");
+        shell.execute("renice 2 3");
+        shell.execute("sleep 3");
+        shell.execute("wake 3");
+        shell.execute("tick 1");
+
+        String output = bytes.toString(StandardCharsets.UTF_8);
+        assertTrue(output.contains("init"));
+        assertTrue(output.contains("quanta-shell"));
+        assertTrue(output.contains("Процесс создан: PID=3"));
+        assertTrue(output.contains("Процесс создан с nice=-1: PID=4"));
+        assertFalse(output.contains("Неизвестная команда"));
+    }
+}

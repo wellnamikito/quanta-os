@@ -9,49 +9,49 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Планировщик MLFQ: многоуровневые очереди с обратной связью.
+ * Учебный MLFQ-планировщик с Round Robin внутри каждого уровня.
  *
- * <p>Очередь 0 имеет наивысший динамический приоритет и короткий квант,
- * очередь 2 — наименьший приоритет и длинный квант. Процесс, исчерпавший
- * квант, понижается. Долго ожидающий процесс повышается механизмом aging —
- * это не даёт низкоприоритетным задачам голодать.</p>
+ * <p>0 — самый высокий приоритет, 15 — самый низкий. Отрицательное значение
+ * nice повышает приоритет. Полный квант понижает процесс, а ожидание и
+ * завершение I/O повышают его.</p>
  */
 public final class MultilevelFeedbackScheduler {
-    /** Кванты времени для трёх уровней, в условных тактах. */
-    private static final int[] QUANTA = {2, 4, 8};
-    /** После стольких тактов ожидания процесс повышается на один уровень. */
+    private static final int[] QUEUE_MIN_PRIORITY = {0, 6, 11};
+    private static final int[] QUEUE_MAX_PRIORITY = {5, 10, 15};
     private static final int AGING_TICKS = 6;
 
     private final List<ArrayDeque<ProcessControlBlock>> queues = List.of(
             new ArrayDeque<>(), new ArrayDeque<>(), new ArrayDeque<>());
     private final Map<Integer, ProcessControlBlock> processes = new HashMap<>();
+    /** Настраиваемые кванты для очередей 0, 1 и 2. */
+    private final int[] quanta = {2, 4, 8};
     private int nextPid = 1;
     private ProcessControlBlock current;
     private int remainingQuantum;
 
-    /**
-     * Создаёт процесс и помещает его в очередь, вычисленную из абсолютного и
-     * относительного приоритетов.
-     */
+    /** Создаёт процесс без указанного родителя; удобно для автономных тестов. */
     public int create(String name, int absolutePriority, int relativePriority) {
+        return create(name, 0, absolutePriority, relativePriority);
+    }
+
+    /** Создаёт процесс и ставит его в MLFQ-очередь. */
+    public int create(String name, int parentPid, int absolutePriority,
+                      int relativePriority) {
         if (name == null || name.isBlank())
             throw new IllegalArgumentException("Имя процесса не должно быть пустым");
+        if (parentPid < 0)
+            throw new IllegalArgumentException("PPID не может быть отрицательным");
         validateAbsolute(absolutePriority);
         validateRelative(relativePriority);
-        int dynamic = baseQueue(absolutePriority, relativePriority);
-        ProcessControlBlock process = new ProcessControlBlock(nextPid++, name,
-                absolutePriority, relativePriority, dynamic);
+        ProcessControlBlock process = new ProcessControlBlock(nextPid++, parentPid, name,
+                absolutePriority, relativePriority,
+                effectivePriority(absolutePriority, relativePriority));
         processes.put(process.pid(), process);
         enqueue(process);
         return process.pid();
     }
 
-    /**
-     * Выполняет один такт. При необходимости выбирает самый приоритетный готовый
-     * процесс и после исчерпания кванта переводит его в более низкую очередь.
-     *
-     * @return понятное событие для демонстрации работы алгоритма
-     */
+    /** Выполняет один условный такт CPU. */
     public String tick() {
         List<String> events = new ArrayList<>();
         if (current == null)
@@ -60,26 +60,38 @@ public final class MultilevelFeedbackScheduler {
             ageReadyProcesses(events);
             return "idle: готовых процессов нет";
         }
+
         ProcessControlBlock running = current;
+        int previousQueue = queueOf(running.dynamicPriority());
         running.ranOneTick();
         remainingQuantum--;
         events.add("PID " + running.pid() + " выполняется, остаток кванта="
                 + remainingQuantum);
         ageReadyProcesses(events);
         if (remainingQuantum == 0) {
-            int previous = running.dynamicPriority();
-            running.setDynamicPriority(Math.min(previous + 1, QUANTA.length - 1));
+            int previousPriority = running.dynamicPriority();
+            int nextQueue = Math.min(previousQueue + 1, queues.size() - 1);
+            /*
+             * Процесс с очереди 2 уже нельзя понизить уровнем ниже. Его числовой
+             * приоритет всё равно может ухудшаться до 15, но не должен внезапно
+             * улучшаться до 11 после каждого кванта.
+             */
+            int nextPriority = previousQueue == nextQueue
+                    ? Math.min(QUEUE_MAX_PRIORITY[nextQueue], previousPriority + 1)
+                    : QUEUE_MIN_PRIORITY[nextQueue];
+            running.setDynamicPriority(nextPriority);
             running.setState(ProcessState.READY);
             running.clearWaiting();
             enqueue(running);
             current = null;
-            events.add("PID " + running.pid() + " исчерпал квант: очередь "
-                    + previous + " -> " + running.dynamicPriority());
+            events.add("PID " + running.pid() + " исчерпал квант: приоритет "
+                    + previousPriority + " -> " + running.dynamicPriority()
+                    + ", очередь " + previousQueue + " -> " + nextQueue);
         }
         return String.join("; ", events);
     }
 
-    /** Выполняет несколько тактов и возвращает события каждого такта. */
+    /** Выполняет несколько тактов. */
     public List<String> tick(int count) {
         if (count < 1 || count > 10_000)
             throw new IllegalArgumentException("Число тактов должно быть от 1 до 10000");
@@ -89,7 +101,7 @@ public final class MultilevelFeedbackScheduler {
         return events;
     }
 
-    /** Переводит готовый или выполняемый процесс в состояние ожидания. */
+    /** Блокирует процесс, например при ожидании I/O или пустого канала. */
     public void block(int pid) {
         ProcessControlBlock process = process(pid);
         if (process.state() == ProcessState.TERMINATED)
@@ -104,21 +116,20 @@ public final class MultilevelFeedbackScheduler {
         process.setState(ProcessState.BLOCKED);
     }
 
-    /**
-     * Возвращает разблокированный процесс в готовые. Он получает небольшое
-     * интерактивное повышение, что и является обратной связью MLFQ.
-     */
+    /** Возвращает процесс из I/O-ожидания с интерактивным повышением. */
     public void wake(int pid) {
         ProcessControlBlock process = process(pid);
         if (process.state() != ProcessState.BLOCKED)
             throw new IllegalArgumentException("Разбудить можно только заблокированный процесс");
-        process.setDynamicPriority(Math.max(0, process.dynamicPriority() - 1));
+        int oldQueue = queueOf(process.dynamicPriority());
+        int promotedQueue = Math.max(0, oldQueue - 1);
+        // Повышаем ровно на один диапазон, а не прыгаем сразу к его максимуму.
+        process.setDynamicPriority(QUEUE_MAX_PRIORITY[promotedQueue]);
         process.clearWaiting();
-        process.setState(ProcessState.READY);
         enqueue(process);
     }
 
-    /** Завершает процесс и удаляет его из очередей или с процессора. */
+    /** Завершает процесс. */
     public void terminate(int pid) {
         ProcessControlBlock process = process(pid);
         removeFromReadyQueues(process);
@@ -129,14 +140,14 @@ public final class MultilevelFeedbackScheduler {
         process.setState(ProcessState.TERMINATED);
     }
 
-    /** Меняет относительный приоритет и пересчитывает начальный уровень MLFQ. */
+    /** Меняет nice-поправку и пересчитывает динамический приоритет. */
     public void setRelativePriority(int pid, int relativePriority) {
         validateRelative(relativePriority);
         ProcessControlBlock process = process(pid);
         if (process.state() == ProcessState.TERMINATED)
             throw new IllegalArgumentException("Нельзя менять приоритет завершённого процесса");
         process.setRelativePriority(relativePriority);
-        process.setDynamicPriority(baseQueue(process.absolutePriority(), relativePriority));
+        process.setDynamicPriority(effectivePriority(process.absolutePriority(), relativePriority));
         process.clearWaiting();
         if (process.state() == ProcessState.READY) {
             removeFromReadyQueues(process);
@@ -144,21 +155,33 @@ public final class MultilevelFeedbackScheduler {
         }
     }
 
-    /** Возвращает снимок процессов, упорядоченный по PID. */
+    /** Меняет длину кванта указанной очереди. */
+    public void setQuantum(int queueLevel, int ticks) {
+        validateQueue(queueLevel);
+        if (ticks < 1 || ticks > 1_000)
+            throw new IllegalArgumentException("Квант должен быть от 1 до 1000 тактов");
+        quanta[queueLevel] = ticks;
+    }
+
+    /** @return копия квантов очередей 0, 1 и 2. */
+    public int[] quanta() { return quanta.clone(); }
+
+    /** Возвращает строки для ps, упорядоченные по PID. */
     public List<ProcessSnapshot> snapshot() {
         return processes.values().stream().sorted(Comparator.comparingInt(
                 ProcessControlBlock::pid)).map(p -> new ProcessSnapshot(p.pid(),
-                p.name(), p.state(), p.absolutePriority(), p.relativePriority(),
-                p.dynamicPriority(), p.executedTicks(), p.waitedTicks())).toList();
+                p.parentPid(), p.name(), p.state(), p.absolutePriority(),
+                p.relativePriority(), p.dynamicPriority(), queueOf(p.dynamicPriority()),
+                p.executedTicks(), p.waitedTicks(), p == current ? remainingQuantum : 0)).toList();
     }
 
-    /** @return описание текущего процесса или {@code idle}. */
+    /** @return текущий процесс и остаток его кванта или {@code idle}. */
     public String currentProcess() {
         return current == null ? "idle" : "PID " + current.pid() + " (" + current.name()
-                + "), queue=" + current.dynamicPriority() + ", quantum=" + remainingQuantum;
+                + "), priority=" + current.dynamicPriority() + ", queue="
+                + queueOf(current.dynamicPriority()) + ", quantum=" + remainingQuantum;
     }
 
-    /** Выбирает первый процесс из самой приоритетной непустой очереди. */
     private void dispatch(List<String> events) {
         for (int level = 0; level < queues.size(); level++) {
             ProcessControlBlock candidate = queues.get(level).pollFirst();
@@ -167,14 +190,13 @@ public final class MultilevelFeedbackScheduler {
             current = candidate;
             current.setState(ProcessState.RUNNING);
             current.clearWaiting();
-            remainingQuantum = QUANTA[level];
+            remainingQuantum = quanta[level];
             events.add("диспетчер выбрал PID " + current.pid() + " из очереди " + level
                     + ", квант=" + remainingQuantum);
             return;
         }
     }
 
-    /** Повышает долго ждущие процессы, предотвращая голодание очереди 2. */
     private void ageReadyProcesses(List<String> events) {
         List<ProcessControlBlock> promote = new ArrayList<>();
         for (ArrayDeque<ProcessControlBlock> queue : queues) {
@@ -182,31 +204,30 @@ public final class MultilevelFeedbackScheduler {
             while (iterator.hasNext()) {
                 ProcessControlBlock process = iterator.next();
                 process.waitedOneTick();
-                if (process.waitedTicks() >= AGING_TICKS && process.dynamicPriority() > 0) {
+                int oldQueue = queueOf(process.dynamicPriority());
+                if (process.waitedTicks() >= AGING_TICKS && oldQueue > 0) {
                     iterator.remove();
-                    process.setDynamicPriority(process.dynamicPriority() - 1);
+                    int newQueue = oldQueue - 1;
+                    process.setDynamicPriority(QUEUE_MAX_PRIORITY[newQueue]);
                     process.clearWaiting();
                     promote.add(process);
                     events.add("aging повысил PID " + process.pid() + " до очереди "
-                            + process.dynamicPriority());
+                            + newQueue);
                 }
             }
         }
         promote.forEach(this::enqueue);
     }
 
-    /** Добавляет процесс в хвост его текущей очереди готовности. */
     private void enqueue(ProcessControlBlock process) {
         process.setState(ProcessState.READY);
-        queues.get(process.dynamicPriority()).addLast(process);
+        queues.get(queueOf(process.dynamicPriority())).addLast(process);
     }
 
-    /** Удаляет процесс из всех очередей готовности, если он там есть. */
     private void removeFromReadyQueues(ProcessControlBlock process) {
         queues.forEach(queue -> queue.remove(process));
     }
 
-    /** Находит PCB или сообщает об отсутствующем PID. */
     private ProcessControlBlock process(int pid) {
         ProcessControlBlock process = processes.get(pid);
         if (process == null)
@@ -214,21 +235,30 @@ public final class MultilevelFeedbackScheduler {
         return process;
     }
 
-    /** Суммирует абсолютный класс и относительную поправку, ограничивая диапазон. */
-    private int baseQueue(int absolute, int relative) {
-        return Math.max(0, Math.min(QUANTA.length - 1, absolute + relative));
+    private int effectivePriority(int absolute, int relative) {
+        return Math.max(0, Math.min(15, absolute + relative));
     }
 
-    /** Проверяет допустимый абсолютный класс из трёх очередей. */
+    private int queueOf(int priority) {
+        for (int queue = 0; queue < QUEUE_MAX_PRIORITY.length; queue++) {
+            if (priority <= QUEUE_MAX_PRIORITY[queue])
+                return queue;
+        }
+        return QUEUE_MAX_PRIORITY.length - 1;
+    }
+
     private void validateAbsolute(int priority) {
-        if (priority < 0 || priority >= QUANTA.length)
-            throw new IllegalArgumentException("Абсолютный приоритет: 0, 1 или 2");
+        if (priority < 0 || priority > 15)
+            throw new IllegalArgumentException("Абсолютный приоритет: от 0 до 15");
     }
 
-    /** Проверяет границы пользовательской относительной поправки. */
     private void validateRelative(int priority) {
         if (priority < -2 || priority > 2)
             throw new IllegalArgumentException("Относительный приоритет: от -2 до 2");
     }
-}
 
+    private void validateQueue(int queue) {
+        if (queue < 0 || queue >= queues.size())
+            throw new IllegalArgumentException("Номер очереди: 0, 1 или 2");
+    }
+}
